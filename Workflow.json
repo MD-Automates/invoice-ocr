@@ -1,0 +1,257 @@
+{
+  "name": "invoice-reading",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "invoice",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -2032,
+        48
+      ],
+      "id": "f6dedb1e-cb22-4560-97d6-25fbe0f572f0",
+      "name": "Webhook",
+      "webhookId": "5cd1ea0c-120e-450c-a567-d283f48e5b92"
+    },
+    {
+      "parameters": {
+        "operation": "binaryToPropery",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        -1808,
+        48
+      ],
+      "id": "c2da91ab-8d26-4835-9a13-c01b507e4dde",
+      "name": "Convert to Base64"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=[INSERT YOUR KEY HERE]",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  ({\n    \"contents\": [\n      {\n        \"parts\": [\n          {\n            \"text\": \"Extract the following data from this Moroccan invoice into a JSON object:\\n1. vendor_name\\n2. vendor_ice (15-digit Identifiant Commun de l'Entreprise)\\n3. vendor_if (Identifiant Fiscal)\\n4. vendor_rc (Registre de Commerce)\\n5. client_name (The name of the buyer/customer, e.g., the company being billed)\\n6. client_ice (The 15-digit ICE of the buyer/customer)\\n7. invoice_number\\n8. invoice_date (YYYY-MM-DD)\\n9. amount_ht (Total Hors Taxe - Number)\\n10. tva_rate (The VAT percentage applied - Number)\\n11. tva_amount (The total VAT amount in MAD - Number)\\n12. amount_ttc (Total Toutes Taxes Comprises - Number)\\n13. items (An array of objects containing 'description', 'quantity', 'unit_price', 'discount_percent' (the '% Rem' column, default to 0 if empty), and 'total').\\n\\nIf any identifier (like ICE or IF) is missing, return null for that field. Do not include markdown formatting or conversational text.\"\n          },\n          {\n            \"inline_data\": {\n              \"mime_type\": $('Webhook').first().binary.data.mimeType,\n              \"data\": $json.data\n            }\n          }\n        ]\n      }\n    ],\n    \"generationConfig\": {\n      \"temperature\": 0.1,\n      \"responseMimeType\": \"application/json\"\n    }\n  })\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -1584,
+        48
+      ],
+      "id": "39527867-1e22-4152-ad83-fa495410bf4c",
+      "name": "Gemini 3.1: Extract Data",
+      "retryOnFail": false,
+      "waitBetweenTries": 3000,
+      "maxTries": 5
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the JSON string from the Gemini API response\n// Gemini wraps the text inside candidates[0].content.parts[0].text\nconst geminiResponse = $input.first().json.candidates[0].content.parts[0].text;\n\n// Parse the string into a real JSON object\nlet parsedData;\ntry {\n  // Use a regex to strip markdown blocks if the model accidentally included them\n  let cleanString = geminiResponse.replace(/```(?:json)?\\n?/g, '').trim();\n  parsedData = JSON.parse(cleanString);\n} catch (error) {\n  // If parsing fails, throw an error to flag it\n  throw new Error(`Failed to parse Gemini JSON: ${error.message}`);\n}\n\n// Ensure the numerical fields are actually numbers for the math validation later\nif (parsedData.amount_ht) parsedData.amount_ht = Number(parsedData.amount_ht);\nif (parsedData.tva_amount) parsedData.tva_amount = Number(parsedData.tva_amount);\nif (parsedData.amount_ttc) parsedData.amount_ttc = Number(parsedData.amount_ttc);\n\nif (parsedData.items && Array.isArray(parsedData.items)) {\n    parsedData.items.forEach(item => {\n        if (item.quantity) item.quantity = Number(item.quantity);\n        if (item.unit_price) item.unit_price = Number(item.unit_price);\n        if (item.discount_percent) item.discount_percent = Number(item.discount_percent);\n        if (item.total) item.total = Number(item.total);\n    });\n}\n\n// Return the clean, parsed object as the new item\nreturn parsedData;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1360,
+        48
+      ],
+      "id": "5d7b618c-bfa4-4d02-8daf-5e0adca8c35f",
+      "name": "Clean & Format JSON"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Loop through all items passed from the previous node\nfor (let item of $input.all()) {\n  let invoice = item.json;\n  let errors = []; // We will store any discrepancies here\n\n  // 1. TRUTH CHECK: Ensure mandatory Moroccan Tax IDs exist\n  if (!invoice.vendor_ice) errors.push(\"Missing Vendor ICE (Required for deduction).\");\n  if (!invoice.client_ice) errors.push(\"Missing Client ICE (Required for deduction).\");\n  if (!invoice.vendor_if) errors.push(\"Missing Vendor IF (Identifiant Fiscal).\");\n\n  // 2. MATH CHECK: Verify line item totals (HT) INCLUDING DISCOUNTS\n  let calculated_ht = 0;\n  \n  if (invoice.items && Array.isArray(invoice.items)) {\n    invoice.items.forEach((line, index) => {\n      // Safely handle missing discounts\n      let discount = line.discount_percent || 0; \n      \n      // Math: (Qty * Unit Price HT) - Discount %\n      let base_total = line.quantity * line.unit_price;\n      let expected_line_total = base_total * (1 - (discount / 100));\n      \n      // Check if our math matches the printed Montant HT (allowing a 0.05 MAD margin for rounding)\n      if (Math.abs(expected_line_total - line.total) > 0.05) {\n        errors.push(`Line ${index + 1} math error: ${line.quantity} x ${line.unit_price} minus ${discount}% discount should be ${expected_line_total.toFixed(2)}, but invoice says ${line.total}.`);\n      }\n      \n      // Add to our running Subtotal HT\n      calculated_ht += line.total;\n    });\n  }\n\n  // 3. MATH CHECK: Verify Subtotal HT matches the sum of the lines\n  if (Math.abs(calculated_ht - invoice.amount_ht) > 0.05) {\n    errors.push(`Amount HT mismatch. Items sum to ${calculated_ht.toFixed(2)}, but invoice states ${invoice.amount_ht}.`);\n  }\n\n  // 4. MATH CHECK: HT + TVA = TTC\n  let calculated_ttc = invoice.amount_ht + invoice.tva_amount;\n  if (Math.abs(calculated_ttc - invoice.amount_ttc) > 0.05) {\n    errors.push(`Amount TTC mismatch. HT + TVA equals ${calculated_ttc.toFixed(2)}, but invoice states ${invoice.amount_ttc}.`);\n  }\n\n  // 5. ROUTING PREPARATION: Attach the validation results\n  invoice.isValid = errors.length === 0;\n  invoice.validation_errors = errors;\n}\n\n// Return the newly validated items\nreturn $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1136,
+        48
+      ],
+      "id": "4e85b8fc-eeec-4650-8799-447c4368cee5",
+      "name": "DGI Math & ICE Validator"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "5cf4bfa4-a895-4f2f-8127-6750a9327dbd",
+              "leftValue": "={{ $json.isValid }}",
+              "rightValue": "isValid",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -912,
+        48
+      ],
+      "id": "4a485149-1621-480d-84fc-a7f0d987bb97",
+      "name": "Is 100% Compliant?"
+    },
+    {
+      "parameters": {
+        "jsCode": "// This node expects standard JSON input containing invoice details\n// Make sure to run this AFTER your Math Validation node to ensure the data is perfect\n\nconst items = $input.all();\nconst xmlOutputs = [];\n\nfor (let item of items) {\n  const invoice = item.json;\n\n  // Skip invalid invoices if you haven't filtered them already\n  if (invoice.isValid === false) {\n    xmlOutputs.push({ json: { error: \"Invoice failed validation\", data: invoice } });\n    continue;\n  }\n\n  // The UBL 2.1 standard requires these specific namespaces at the root\n  let xml = `<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Invoice xmlns=\"urn:oasis:names:specification:ubl:schema:xsd:Invoice-2\"\n         xmlns:cac=\"urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2\"\n         xmlns:cbc=\"urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2\">\n`;\n\n  // Basic invoice metadata\n  xml += `  <cbc:UBLVersionID>2.1</cbc:UBLVersionID>\n  <cbc:CustomizationID>urn:cen.eu:en16931:2017#compliant#urn:dgi.gov.ma:facturation:v1.0</cbc:CustomizationID>\n  <cbc:ID>${invoice.invoice_number || 'UNKNOWN'}</cbc:ID>\n  <cbc:IssueDate>${invoice.invoice_date || new Date().toISOString().split('T')[0]}</cbc:IssueDate>\n  <cbc:InvoiceTypeCode>380</cbc:InvoiceTypeCode> <!-- 380 indicates a standard commercial invoice -->\n  <cbc:DocumentCurrencyCode>MAD</cbc:DocumentCurrencyCode>\n`;\n\n  // cac:AccountingSupplierParty contains the Vendor details\n  xml += `  <cac:AccountingSupplierParty>\n    <cac:Party>\n      <cac:PartyName>\n        <cbc:Name>${invoice.vendor_name || 'Missing Vendor Name'}</cbc:Name>\n      </cac:PartyName>\n      <cac:PartyLegalEntity>\n        <cbc:RegistrationName>${invoice.vendor_name || 'Missing Vendor Name'}</cbc:RegistrationName>\n        <cbc:CompanyID schemeID=\"ICE\">${invoice.vendor_ice || '000000000000000'}</cbc:CompanyID>\n      </cac:PartyLegalEntity>\n      <cac:PartyTaxScheme>\n        <cbc:CompanyID schemeID=\"IF\">${invoice.vendor_if || '0000000'}</cbc:CompanyID>\n        <cac:TaxScheme>\n          <cbc:ID>VAT</cbc:ID>\n        </cac:TaxScheme>\n      </cac:PartyTaxScheme>\n    </cac:Party>\n  </cac:AccountingSupplierParty>\n`;\n\n  // cac:AccountingCustomerParty contains the Buyer details\n  xml += `  <cac:AccountingCustomerParty>\n    <cac:Party>\n      <cac:PartyName>\n        <cbc:Name>${invoice.client_name || 'Missing Client Name'}</cbc:Name>\n      </cac:PartyName>\n      <cac:PartyLegalEntity>\n        <cbc:RegistrationName>${invoice.client_name || 'Missing Client Name'}</cbc:RegistrationName>\n        <cbc:CompanyID schemeID=\"ICE\">${invoice.client_ice || '000000000000000'}</cbc:CompanyID>\n      </cac:PartyLegalEntity>\n    </cac:Party>\n  </cac:AccountingCustomerParty>\n`;\n\n  // Overall Tax calculations\n  const tvaRate = invoice.tva_rate || 20; // Default to 20% if missing\n  const tvaAmount = invoice.tva_amount || 0;\n  const amountHt = invoice.amount_ht || 0;\n\n  xml += `  <cac:TaxTotal>\n    <cbc:TaxAmount currencyID=\"MAD\">${tvaAmount.toFixed(2)}</cbc:TaxAmount>\n    <cac:TaxSubtotal>\n      <cbc:TaxableAmount currencyID=\"MAD\">${amountHt.toFixed(2)}</cbc:TaxableAmount>\n      <cbc:TaxAmount currencyID=\"MAD\">${tvaAmount.toFixed(2)}</cbc:TaxAmount>\n      <cac:TaxCategory>\n        <cbc:ID>S</cbc:ID> <!-- Standard rate -->\n        <cbc:Percent>${tvaRate}</cbc:Percent>\n        <cac:TaxScheme>\n          <cbc:ID>VAT</cbc:ID>\n        </cac:TaxScheme>\n      </cac:TaxCategory>\n    </cac:TaxSubtotal>\n  </cac:TaxTotal>\n`;\n\n  // The final required totals\n  xml += `  <cac:LegalMonetaryTotal>\n    <cbc:LineExtensionAmount currencyID=\"MAD\">${amountHt.toFixed(2)}</cbc:LineExtensionAmount>\n    <cbc:TaxExclusiveAmount currencyID=\"MAD\">${amountHt.toFixed(2)}</cbc:TaxExclusiveAmount>\n    <cbc:TaxInclusiveAmount currencyID=\"MAD\">${(invoice.amount_ttc || 0).toFixed(2)}</cbc:TaxInclusiveAmount>\n    <cbc:PayableAmount currencyID=\"MAD\">${(invoice.amount_ttc || 0).toFixed(2)}</cbc:PayableAmount>\n  </cac:LegalMonetaryTotal>\n`;\n\n  // Now add each individual product/service from the invoice array\n  if (invoice.items && Array.isArray(invoice.items)) {\n    invoice.items.forEach((line, index) => {\n      let lineTotal = line.total || (line.quantity * line.unit_price);\n      let discountPercent = parseFloat(line.discount_percent) || 0;\n      \n      xml += `  <cac:InvoiceLine>\n    <cbc:ID>${index + 1}</cbc:ID>\n    <cbc:InvoicedQuantity unitCode=\"EA\">${line.quantity || 1}</cbc:InvoicedQuantity>\n    <cbc:LineExtensionAmount currencyID=\"MAD\">${lineTotal.toFixed(2)}</cbc:LineExtensionAmount>\n`;\n\n      // NEW: Inject AllowanceCharge for Discounts\n      if (discountPercent > 0) {\n        let baseAmount = line.quantity * line.unit_price;\n        let discountAmount = baseAmount * (discountPercent / 100);\n        xml += `    <cac:AllowanceCharge>\n      <cbc:ChargeIndicator>false</cbc:ChargeIndicator> <!-- false means it is a discount, not a charge -->\n      <cbc:MultiplierFactorNumeric>${discountPercent}</cbc:MultiplierFactorNumeric>\n      <cbc:Amount currencyID=\"MAD\">${discountAmount.toFixed(2)}</cbc:Amount>\n      <cbc:BaseAmount currencyID=\"MAD\">${baseAmount.toFixed(2)}</cbc:BaseAmount>\n    </cac:AllowanceCharge>\n`;\n      }\n\n      xml += `    <cac:Item>\n      <cbc:Description>${line.description || 'Unknown Item'}</cbc:Description>\n      <cbc:Name>${line.description || 'Unknown Item'}</cbc:Name>\n    </cac:Item>\n    <cac:Price>\n      <cbc:PriceAmount currencyID=\"MAD\">${(line.unit_price || 0).toFixed(2)}</cbc:PriceAmount>\n    </cac:Price>\n  </cac:InvoiceLine>\n`;\n    });\n  }\n\n  // Close the root Invoice tag\n  xml += `</Invoice>`;\n\n  // Output the XML string along with the original metadata\n // Output the EXACT shape the frontend expects\n  xmlOutputs.push({\n    json: {\n      status: \"Success\",\n      isValid: true,\n      data: {\n        vendor_name: invoice.vendor_name,\n        vendor_ice: invoice.vendor_ice,\n        client_name: invoice.client_name,\n        client_ice: invoice.client_ice,\n        amount_ttc: invoice.amount_ttc,\n        items: invoice.items,\n        ubl_xml: xml\n      }\n    }\n  });\n\n}\n\nreturn xmlOutputs;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -688,
+        -48
+      ],
+      "id": "e7e61b27-4cb7-486e-a7f2-073e16fb1978",
+      "name": "Generate UBL 2.1 XML"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -464,
+        -48
+      ],
+      "id": "b1eef569-0ac8-477b-932b-b23493f391cc",
+      "name": "Send Success & XML to UI"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"isValid\": false,\n  \"errors\": {{ JSON.stringify($json.validation_errors || [\"Unknown validation error occurred.\"]) }}\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -688,
+        144
+      ],
+      "id": "ff87fe30-c10e-467b-aa2c-2a830ee1baf1",
+      "name": "Send Error (Halt) to UI"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Convert to Base64",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to Base64": {
+      "main": [
+        [
+          {
+            "node": "Gemini 3.1: Extract Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini 3.1: Extract Data": {
+      "main": [
+        [
+          {
+            "node": "Clean & Format JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean & Format JSON": {
+      "main": [
+        [
+          {
+            "node": "DGI Math & ICE Validator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DGI Math & ICE Validator": {
+      "main": [
+        [
+          {
+            "node": "Is 100% Compliant?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is 100% Compliant?": {
+      "main": [
+        [
+          {
+            "node": "Generate UBL 2.1 XML",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Error (Halt) to UI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate UBL 2.1 XML": {
+      "main": [
+        [
+          {
+            "node": "Send Success & XML to UI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "253e5a8f-923c-494a-848c-6634cc0cee90",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "8e62565838062aa26ecd149cea2a57b45cc16ed1930177dbe7458fcfe009451a"
+  },
+  "id": "1XKzBO4g6EnCIaMj",
+  "tags": []
+}
