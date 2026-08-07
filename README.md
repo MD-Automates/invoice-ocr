@@ -1,25 +1,16 @@
-🇲🇦 Moroccan E-Invoicing AI Pipeline (DGI / xHub)
+# React + Vite
 
-A zero-touch n8n automation pipeline that converts messy, unstructured paper invoices into strict, government-compliant UBL 2.1 XML payloads for the Moroccan DGI (xHub) mandate.
+This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
 
-Instead of relying on fragile OCR templates, this workflow uses AI for extraction and deterministic JavaScript for mathematical tax validation.
+Currently, two official plugins are available:
 
-🧠 How It Works
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
 
-AI Extraction: Uses Google Gemini (Vision) to extract vendor info, ICE, and line items from PDFs or smartphone photos.
+## React Compiler
 
-Math & ICE Validation: A custom Node.js block mathematically verifies the Moroccan ICE (Modulo 97) and recalculates all TVA/TTC totals. If the AI hallucinates a number, the workflow halts.
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
 
-XML Generation: Validated JSON is dynamically mapped into the exact OASIS UBL 2.1 XML dialect required by the DGI.
+## Expanding the Oxlint configuration
 
-💻 How to Use
-
-Download the xfacture_workflow.json file from this repository.
-
-Open your n8n instance.
-
-Go to the top right of your canvas, click Import from File, and select the JSON.
-
-Add your free Gemini API key to the HTTP Request node to start processing documents!
-
-Built by MD Automates.
+If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
